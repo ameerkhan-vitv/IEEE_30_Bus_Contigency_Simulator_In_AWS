@@ -1,0 +1,209 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: IEEE 30-bus grid simulator on AWS (free-tier friendly, no servers)
+
+# Services used (8): S3, CloudFront, API Gateway, Lambda, DynamoDB,
+#                    CloudWatch (logs + alarm + custom metrics), EventBridge, SNS
+
+Parameters:
+  AlertEmail:
+    Type: String
+    Description: Email address that gets the nightly N-1 report and error alarms
+
+Globals:
+  Function:
+    Runtime: python3.12
+    MemorySize: 512
+    Environment:
+      Variables:
+        TABLE_NAME: !Ref Table
+        TOPIC_ARN: !Ref AlertTopic
+        REPORT_BUCKET: !Ref ReportBucket
+
+Resources:
+  # ---------------- DynamoDB: saved scenarios + N-1 cache ----------------
+  Table:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - {AttributeName: pk, AttributeType: S}
+        - {AttributeName: sk, AttributeType: S}
+      KeySchema:
+        - {AttributeName: pk, KeyType: HASH}
+        - {AttributeName: sk, KeyType: RANGE}
+      BillingMode: PROVISIONED          # provisioned 5/5 stays inside the always-free 25/25
+      ProvisionedThroughput: {ReadCapacityUnits: 5, WriteCapacityUnits: 5}
+      TimeToLiveSpecification: {AttributeName: ttl, Enabled: true}
+
+  # ---------------- SNS: email alerts ----------------
+  AlertTopic:
+    Type: AWS::SNS::Topic
+  AlertSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref AlertTopic
+      Protocol: email
+      Endpoint: !Ref AlertEmail
+
+  # ---------------- S3: website + nightly reports ----------------
+  SiteBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  ReportBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - {Id: expire-old-reports, Status: Enabled, ExpirationInDays: 30}
+
+  # ---------------- CloudFront: HTTPS front for the website ----------------
+  OAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub ${AWS::StackName}-oac
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        DefaultRootObject: index.html
+        PriceClass: PriceClass_100
+        Origins:
+          - Id: site
+            DomainName: !GetAtt SiteBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt OAC.Id
+            S3OriginConfig: {OriginAccessIdentity: ''}
+        DefaultCacheBehavior:
+          TargetOriginId: site
+          ViewerProtocolPolicy: redirect-to-https
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6   # managed "CachingOptimized"
+
+  SiteBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref SiteBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: cloudfront.amazonaws.com}
+            Action: s3:GetObject
+            Resource: !Sub ${SiteBucket.Arn}/*
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub arn:aws:cloudfront::${AWS::AccountId}:distribution/${Distribution}
+
+  # ---------------- API Gateway (HTTP API) ----------------
+  Api:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      CorsConfiguration:
+        AllowOrigins: ['*']
+        AllowHeaders: [Content-Type, X-Client-Id]
+        AllowMethods: [GET, POST, DELETE, OPTIONS]
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: 20       # protects the free tier from runaway loops
+        ThrottlingRateLimit: 10
+
+  # ---------------- Lambda: the API ----------------
+  ApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties: {RetentionInDays: 14}
+
+  ApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: backend/
+      Handler: lambda_handler.api_handler
+      Timeout: 25                       # API Gateway gives up at 29 s
+      LoggingConfig: {LogGroup: !Ref ApiLogGroup}
+      Policies:
+        - DynamoDBCrudPolicy: {TableName: !Ref Table}
+      Events:
+        Health:
+          Type: HttpApi
+          Properties: {ApiId: !Ref Api, Path: /health, Method: GET}
+        Demo:
+          Type: HttpApi
+          Properties: {ApiId: !Ref Api, Path: /demo, Method: GET}
+        Solve:
+          Type: HttpApi
+          Properties: {ApiId: !Ref Api, Path: /solve, Method: POST}
+        N1:
+          Type: HttpApi
+          Properties: {ApiId: !Ref Api, Path: /n1, Method: GET}
+        Validate:
+          Type: HttpApi
+          Properties: {ApiId: !Ref Api, Path: /validate, Method: GET}
+        ScenariosList:
+          Type: HttpApi
+          Properties: {ApiId: !Ref Api, Path: /scenarios, Method: GET}
+        ScenariosSave:
+          Type: HttpApi
+          Properties: {ApiId: !Ref Api, Path: /scenarios, Method: POST}
+        ScenariosDelete:
+          Type: HttpApi
+          Properties: {ApiId: !Ref Api, Path: '/scenarios/{id}', Method: DELETE}
+
+  # ---------------- Lambda + EventBridge: nightly N-1 report ----------------
+  SweepLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties: {RetentionInDays: 14}
+
+  SweepFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: backend/
+      Handler: lambda_handler.nightly_handler
+      Timeout: 120
+      LoggingConfig: {LogGroup: !Ref SweepLogGroup}
+      Policies:
+        - DynamoDBCrudPolicy: {TableName: !Ref Table}
+        - SNSPublishMessagePolicy: {TopicName: !GetAtt AlertTopic.TopicName}
+        - S3WritePolicy: {BucketName: !Ref ReportBucket}
+      Events:
+        Nightly:
+          Type: Schedule
+          Properties:
+            Schedule: cron(30 18 * * ? *)     # 00:00 IST every day
+
+  # ---------------- CloudWatch: alarm on errors ----------------
+  ErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: The API Lambda raised an error
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - {Name: FunctionName, Value: !Ref ApiFunction}
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopic]
+
+Outputs:
+  ApiUrl:
+    Value: !GetAtt Api.ApiEndpoint
+  SiteUrl:
+    Value: !Sub https://${Distribution.DomainName}
+  SiteBucketName:
+    Value: !Ref SiteBucket

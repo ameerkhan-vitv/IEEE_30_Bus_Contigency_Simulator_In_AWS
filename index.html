@@ -1,0 +1,357 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IEEE 30-Bus Grid Simulator</title>
+<style>
+:root{--bg:#fff;--card:#F2F2F7;--fg:#111;--muted:#636366;--line:#D1D1D6;--accent:#007AFF}
+@media (prefers-color-scheme:dark){:root{--bg:#1C1C1E;--card:#2C2C2E;--fg:#F2F2F7;--muted:#AEAEB2;--line:#48484A}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+header{padding:14px 20px;border-bottom:1px solid var(--line)}
+header h1{margin:0;font-size:18px}
+header p{margin:2px 0 0;color:var(--muted);font-size:12px}
+.wrap{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:16px;padding:16px 20px;max-width:1300px;margin:auto}
+@media (max-width:900px){.wrap{grid-template-columns:1fr}}
+.card{background:var(--card);border-radius:12px;padding:14px;margin-bottom:16px}
+h3{margin:0 0 8px;font-size:14px}
+.muted{color:var(--muted)} .small{font-size:12px} .hide{display:none}
+select,input[type=text],input[type=email],input[type=password],input:not([type]){width:100%;padding:8px;margin:4px 0;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg);font:inherit}
+input[type=range]{width:100%}
+button{padding:7px 12px;border:0;border-radius:8px;background:var(--accent);color:#fff;font:inherit;cursor:pointer}
+button.ghost{background:transparent;color:var(--accent);border:1px solid var(--line)}
+button.chip{padding:4px 9px;margin:2px 3px 2px 0;background:var(--bg);color:var(--fg);border:1px solid var(--line)}
+button.chip.trip{background:#FF3B30;color:#fff;border-color:#FF3B30}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.stats{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px}
+.stat{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:5px 10px;font-size:12px}
+.stat.bad{border-color:#FF3B30;color:#FF3B30}
+#topo{width:100%;height:auto;background:var(--bg);border-radius:10px}
+#topo .hit{cursor:pointer} #topo .hit:hover{stroke:rgba(0,122,255,.25)}
+#topo [data-g]{cursor:pointer}
+.legend{display:flex;flex-wrap:wrap;gap:12px;font-size:12px;color:var(--muted);margin-top:8px}
+.sw{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:4px;vertical-align:-2px}
+.tabs{display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap}
+.tab{background:var(--bg);color:var(--fg);border:1px solid var(--line)}
+.tab.on{background:var(--accent);color:#fff;border-color:var(--accent)}
+.chartsvg{width:100%;height:auto}
+.chartsvg .ax{font-size:10px;fill:var(--muted)} .chartsvg .grid{stroke:var(--line);stroke-width:1}
+.chartsvg .lbl{font-size:11px;fill:var(--fg)}
+table{border-collapse:collapse;width:100%;font-size:12px}
+th,td{padding:5px 8px;text-align:right;border-bottom:1px solid var(--line)}
+th:first-child,td:first-child{text-align:left}
+tbody tr{cursor:pointer} tbody tr:hover{background:var(--bg)}
+.scroll{overflow-x:auto}
+ul{list-style:none;margin:6px 0 0;padding:0}
+li{padding:6px 0;border-bottom:1px solid var(--line);font-size:12px}
+li button{padding:3px 8px;margin-left:4px;font-size:11px}
+#status{font-size:12px;color:var(--muted);min-height:18px}
+#status.err{color:#FF3B30}
+</style>
+</head>
+<body>
+<header>
+  <h1>IEEE 30-Bus Grid Simulator</h1>
+  <p>Runs on AWS: S3 + CloudFront, API Gateway, Lambda, DynamoDB, CloudWatch, EventBridge, SNS</p>
+</header>
+
+<div class="wrap">
+  <main>
+    <div class="card">
+      <div class="stats" id="stats"></div>
+      <div class="row" style="margin-bottom:8px">
+        <span class="small muted">Colour buses by:</span>
+        <label class="small"><input type="radio" name="mode" value="island" checked> island</label>
+        <label class="small"><input type="radio" name="mode" value="voltage"> voltage</label>
+        <span id="status"></span>
+      </div>
+      <div id="topology"></div>
+      <div class="legend">
+        <span><i class="sw" style="background:#34C759"></i>line under 70% loaded</span>
+        <span><i class="sw" style="background:#FF9500"></i>70–100%</span>
+        <span><i class="sw" style="background:#FF3B30"></i>overloaded</span>
+        <span><i class="sw" style="background:transparent;border:2px dashed #FF3B30"></i>line cut</span>
+        <span><i class="sw" style="background:#AEAEB2"></i>blackout</span>
+        <span>■ generator &nbsp; ● load bus</span>
+      </div>
+      <p class="small muted" style="margin:8px 0 0">Click a line to cut or restore it. Click a square (generator) bus to trip or restore it.</p>
+    </div>
+
+    <div class="card">
+      <h3>Islands</h3>
+      <div class="scroll" id="islands"></div>
+    </div>
+
+    <div class="card">
+      <div class="tabs">
+        <button class="tab on" data-t="voltage">Voltages</button>
+        <button class="tab" data-t="balance">Generation vs demand</button>
+        <button class="tab" data-t="loading">Line loading</button>
+        <button class="tab" data-t="n1">N-1 check</button>
+      </div>
+      <div id="chart"></div>
+    </div>
+  </main>
+
+  <aside>
+    <div class="card">
+      <h3>Scenario</h3>
+      <select id="demo"><option>Loading scenarios…</option></select>
+      <p class="small muted" id="desc"></p>
+      <label class="small">System demand: <b id="scaleLbl">100</b>%</label>
+      <input type="range" id="scale" min="50" max="150" step="5" value="100">
+      <div class="small" style="margin-top:8px">Generators (click to trip):</div>
+      <div id="gens"></div>
+      <div class="small" style="margin-top:8px">Cut lines: <b id="cutList">none</b></div>
+      <button class="ghost" id="reset" style="margin-top:8px">Reset to normal</button>
+    </div>
+    <div class="card" id="auth"></div>
+  </aside>
+</div>
+
+<script>
+// This value is filled in by deploy_frontend.sh
+const API = "__API__";
+
+const POS = {1:[1,10],2:[3,10],3:[2,9],4:[3,8],5:[5,10],6:[5,8],7:[6,9],8:[7,8],9:[5,6],10:[5,4],
+  11:[4,6],12:[3,5],13:[3,4],14:[2,4],15:[2,3],16:[4,4],17:[4,3],18:[1,2],19:[2,1],20:[3,1],
+  21:[4,1],22:[5,1],23:[1,3],24:[3,2],25:[6,2],26:[7,2],27:[7,4],28:[7,6],29:[8,3],30:[8,4]};
+const GENS = [1,2,5,8,11,13];
+const RED="#FF3B30", GREEN="#34C759", ORANGE="#FF9500", GREY="#AEAEB2";
+const ISL = ["#007AFF","#34C759","#AF52DE","#FF9500","#5AC8FA","#FF2D55"];
+const VMIN = 0.95, VMAX = 1.10;
+const loadCol = p => p > 100 ? RED : p > 70 ? ORANGE : GREEN;
+const voltCol = v => (v < VMIN || v > VMAX) ? RED : (v < VMIN + 0.02 || v > VMAX - 0.02) ? ORANGE : GREEN;
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
+const state = {cut:new Set(), tripped:new Set(), scale:100, res:null, mode:"island", tab:"voltage", saved:[], demos:[]};
+let solveSeq = 0, n1Seq = 0, timer = null;
+
+// ---------------------------------------------------------------- API
+// Each browser makes a random id once and sends it with every request, so saved scenarios stay per browser.
+function makeClientId() {
+  let id = null;
+  try { id = localStorage.getItem("gridsim-client"); } catch (e) {}
+  if (!id) {
+    id = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : (Date.now() + "-" + Math.random().toString(16).slice(2, 12) + "-0000");
+    try { localStorage.setItem("gridsim-client", id); } catch (e) {}
+  }
+  return id;
+}
+const CLIENT_ID = makeClientId();
+async function api(method, path, body) {
+  const h = {"X-Client-Id": CLIENT_ID};
+  if (body) h["Content-Type"] = "application/json";
+  const r = await fetch(API + path, {method, headers:h, body: body ? JSON.stringify(body) : undefined});
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || j.message || ("HTTP " + r.status));
+  return j;
+}
+
+// ---------------------------------------------------------------- solving
+function setStatus(t, err) { const s = $("status"); s.textContent = t; s.className = err ? "err" : ""; }
+function schedule() { clearTimeout(timer); timer = setTimeout(run, 250); }
+async function run() {
+  const my = ++solveSeq;
+  setStatus("Solving…");
+  try {
+    const res = await api("POST", "/solve", {
+      lines: [...state.cut].map(k => k.split("-").map(Number)),
+      gens: [...state.tripped], scale: state.scale});
+    if (my !== solveSeq) return;
+    state.res = res;
+    setStatus(`Solved in ${res.solve_ms} ms on Lambda`);
+    render();
+  } catch (e) { if (my === solveSeq) setStatus("Error: " + e.message, true); }
+}
+
+// ---------------------------------------------------------------- rendering
+function render() {
+  const res = state.res; if (!res) return;
+  const t = res.totals, lost = t.demand - t.served;
+  const live = Object.values(res.bus).filter(b => b.energized).map(b => b.vm);
+  const stat = (txt, bad) => `<span class="stat${bad ? " bad" : ""}">${txt}</span>`;
+  $("stats").innerHTML =
+    stat(`${res.islands.length} island(s)`, res.islands.length > 1) +
+    stat(`${lost.toFixed(1)} MW load lost`, lost > 0.05) +
+    stat(`${res.violations.overload.length} line(s) overloaded`, res.violations.overload.length > 0) +
+    stat(`${res.violations.voltage.length} bus(es) outside limits`, res.violations.voltage.length > 0) +
+    stat(`lowest voltage ${(live.length ? Math.min(...live) : 0).toFixed(3)} pu`) +
+    stat(`wire losses ${t.losses.toFixed(1)} MW`);
+  $("topology").innerHTML = topology(res);
+  $("islands").innerHTML = "<table><thead><tr><th>Island</th><th>Buses</th><th>Generation MW</th><th>Demand MW</th><th>Load cut MW</th><th>Status</th></tr></thead><tbody>" +
+    res.islands.map(i => `<tr style="cursor:default"><td>#${i.id}</td><td>${i.buses.length}</td><td>${i.gen.toFixed(1)}</td><td>${i.demand.toFixed(1)}</td><td>${i.shed.toFixed(1)}</td><td style="text-align:left">${esc(i.status)}</td></tr>`).join("") + "</tbody></table>";
+  $("cutList").textContent = state.cut.size ? [...state.cut].join(", ") : "none";
+  $("gens").innerHTML = GENS.map(g => `<button class="chip${state.tripped.has(g) ? " trip" : ""}" data-g="${g}">Bus ${g}</button>`).join("");
+  if (state.tab !== "n1") renderTab();
+}
+
+function topology(res) {
+  const W = 760, H = 600;
+  const px = x => 40 + (x - 0.3) * (W - 80) / 10.5, py = y => H - 40 - (y - 0.3) * (H - 80) / 10.4;
+  let s = `<svg id="topo" viewBox="0 0 ${W} ${H}">`;
+  for (const l of res.lines) {
+    const [x1, y1] = POS[l.f], [x2, y2] = POS[l.t];
+    let col, w, dash = "";
+    if (!l.in_service) { col = RED; w = 2.5; dash = 'stroke-dasharray="7 5"'; }
+    else if (!l.energized) { col = "#D1D1D6"; w = 1.5; }
+    else { const mw = Math.max(Math.abs(l.p_from), Math.abs(l.p_to)); col = loadCol(l.loading); w = 1.5 + Math.min(mw, 120) / 30 * 1.4; }
+    const tip = l.in_service && l.energized
+      ? `Line ${l.f}-${l.t}: ${l.p_from.toFixed(1)} MW, ${l.loading.toFixed(0)}% of rating`
+      : `Line ${l.f}-${l.t}: ${l.in_service ? "not energised" : "cut"}`;
+    s += `<line x1="${px(x1)}" y1="${py(y1)}" x2="${px(x2)}" y2="${py(y2)}" stroke="${col}" stroke-width="${w}" ${dash} stroke-linecap="round"/>`;
+    s += `<line class="hit" data-k="${l.f}-${l.t}" x1="${px(x1)}" y1="${py(y1)}" x2="${px(x2)}" y2="${py(y2)}" stroke="transparent" stroke-width="14"><title>${tip}</title></line>`;
+  }
+  for (const b of Object.keys(POS).map(Number)) {
+    const d = res.bus[b], [x, y] = POS[b], isGen = GENS.includes(b);
+    let col;
+    if (state.mode === "voltage") col = d.energized ? voltCol(d.vm) : GREY;
+    else { const isl = res.islands[d.island - 1]; col = (isl.code === "dead" || isl.code === "collapse") ? GREY : ISL[(d.island - 1) % ISL.length]; }
+    const tip = `Bus ${b}${isGen ? " (generator)" : ""}: ${d.energized ? d.vm.toFixed(3) + " pu, " + d.va.toFixed(1) + "°" : "blackout"}; load ${d.pd.toFixed(1)} MW; generation ${d.pg.toFixed(1)} MW`;
+    if (isGen) s += `<rect data-g="${b}" x="${px(x) - 13}" y="${py(y) - 13}" width="26" height="26" rx="4" fill="${col}" stroke="#1C1C1E" stroke-width="1.6"><title>${tip}</title></rect>`;
+    else s += `<circle cx="${px(x)}" cy="${py(y)}" r="11" fill="${col}" stroke="#1C1C1E" stroke-width="1.1"><title>${tip}</title></circle>`;
+    s += `<text x="${px(x)}" y="${py(y) + 3}" fill="#fff" font-size="9" font-weight="700" text-anchor="middle" pointer-events="none">${b}</text>`;
+    if (state.tripped.has(b)) s += `<text x="${px(x)}" y="${py(y) + 8}" fill="${RED}" font-size="30" font-weight="700" text-anchor="middle" pointer-events="none">×</text>`;
+  }
+  return s + "</svg>";
+}
+
+function svgOpen(W, H) { return `<svg viewBox="0 0 ${W} ${H}" class="chartsvg" role="img">`; }
+
+function chartVoltage(res) {
+  const W = 760, H = 300, L = 46, R = 10, T = 14, B = 34, lo = 0.8, hi = 1.15;
+  const y = v => T + (hi - v) / (hi - lo) * (H - T - B), bw = (W - L - R) / 30;
+  let s = svgOpen(W, H);
+  for (const v of [0.8, 0.9, 1.0, 1.1]) s += `<line x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}" class="grid"/><text x="${L - 6}" y="${y(v) + 3}" class="ax" text-anchor="end">${v.toFixed(2)}</text>`;
+  for (const v of [VMIN, VMAX]) s += `<line x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}" stroke="${RED}" stroke-dasharray="5 4"/>`;
+  for (let b = 1; b <= 30; b++) {
+    const vm = res.bus[b].vm, top = y(Math.min(Math.max(vm, lo), hi));
+    if (vm > 0) s += `<rect x="${L + (b - 1) * bw + 1.5}" y="${top}" width="${bw - 3}" height="${y(lo) - top}" fill="${voltCol(vm)}"><title>Bus ${b}: ${vm.toFixed(3)} pu</title></rect>`;
+    s += `<text x="${L + (b - 0.5) * bw}" y="${H - B + 13}" class="ax" text-anchor="middle">${b}</text>`;
+  }
+  return s + `<text x="${W / 2}" y="${H - 4}" class="ax" text-anchor="middle">Bus number · voltage in pu · dashed lines are the 0.95 and 1.10 limits</text></svg>`;
+}
+
+function chartBalance(res) {
+  const W = 760, H = 300, L = 56, R = 10, T = 22, B = 40, isl = res.islands;
+  const mx = Math.max(1, ...isl.map(i => Math.max(i.gen, i.demand, i.shed))) * 1.1;
+  const y = v => T + (1 - v / mx) * (H - T - B), gw = (W - L - R) / isl.length, bw = Math.min(40, gw / 4);
+  let s = svgOpen(W, H);
+  for (let k = 0; k <= 4; k++) { const v = mx * k / 4; s += `<line x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}" class="grid"/><text x="${L - 6}" y="${y(v) + 3}" class="ax" text-anchor="end">${v.toFixed(0)}</text>`; }
+  isl.forEach((i, n) => {
+    const cx = L + (n + 0.5) * gw;
+    [[i.gen, GREEN, "Generation"], [i.demand, RED, "Demand"], [i.shed, ORANGE, "Load cut"]].forEach(([v, c, nm], k) => {
+      const x = cx + (k - 1.5) * bw;
+      s += `<rect x="${x}" y="${y(v)}" width="${bw - 2}" height="${y(0) - y(v)}" fill="${c}"><title>Island #${i.id} ${nm}: ${v.toFixed(1)} MW</title></rect>`;
+    });
+    s += `<text x="${cx}" y="${H - B + 15}" class="lbl" text-anchor="middle">#${i.id} (${i.buses.length} buses)</text>`;
+  });
+  s += `<text x="${L}" y="12" class="ax">MW</text>`;
+  [["Generation", GREEN], ["Demand", RED], ["Load cut", ORANGE]].forEach(([n, c], k) => { s += `<rect x="${W - 260 + k * 85}" y="4" width="10" height="10" fill="${c}"/><text x="${W - 246 + k * 85}" y="13" class="ax">${n}</text>`; });
+  return s + "</svg>";
+}
+
+function chartLoading(res) {
+  const ls = [...res.lines].sort((a, b) => b.loading - a.loading).slice(0, 15);
+  const W = 760, rh = 20, T = 8, L = 60, R = 56, H = ls.length * rh + T + 34;
+  const mx = Math.max(120, ...ls.map(l => l.loading)) * 1.05, x = v => L + v / mx * (W - L - R);
+  let s = svgOpen(W, H);
+  ls.forEach((l, i) => {
+    const yy = T + i * rh;
+    s += `<text x="${L - 8}" y="${yy + 13}" class="lbl" text-anchor="end">${l.f}-${l.t}</text>`;
+    s += `<rect x="${L}" y="${yy + 2}" width="${Math.max(0, x(l.loading) - L)}" height="${rh - 6}" fill="${loadCol(l.loading)}"><title>Line ${l.f}-${l.t}: ${l.loading.toFixed(0)}%</title></rect>`;
+    s += `<text x="${x(l.loading) + 5}" y="${yy + 13}" class="ax">${l.loading.toFixed(0)}%</text>`;
+  });
+  s += `<line x1="${x(100)}" x2="${x(100)}" y1="${T}" y2="${H - 26}" stroke="${RED}" stroke-dasharray="5 4"/>`;
+  return s + `<text x="${W / 2}" y="${H - 6}" class="ax" text-anchor="middle">The 15 busiest lines · % of rating · dashed = 100%</text></svg>`;
+}
+
+function renderTab() {
+  document.querySelectorAll(".tab").forEach(b => b.classList.toggle("on", b.dataset.t === state.tab));
+  if (state.tab === "n1") { loadN1(); return; }
+  $("chart").innerHTML = state.res ? ({voltage:chartVoltage, balance:chartBalance, loading:chartLoading}[state.tab])(state.res) : "";
+}
+
+async function loadN1() {
+  const box = $("chart"), my = ++n1Seq;
+  box.innerHTML = '<p class="muted">Running all 41 single-line outages (a few seconds the first time, cached afterwards)…</p>';
+  try {
+    const j = await api("GET", `/n1?scale=${state.scale}&gens=${[...state.tripped].join(",")}`);
+    if (my !== n1Seq || state.tab !== "n1") return;
+    box.innerHTML = `<p class="small muted">Ranked worst first. ${j.cached ? "Served from the DynamoDB cache." : "Freshly computed and cached in DynamoDB."} Uses the demand and generators set on the right (not the cut lines). Click a row to try that outage. Click the N-1 tab again to refresh after changing settings.</p>
+    <div class="scroll"><table><thead><tr><th>Line cut</th><th>Islands</th><th>Load lost MW</th><th>Overloads</th><th>Max loading %</th><th>Min V pu</th><th>Bus V violations</th><th>Losses MW</th><th>Severity</th></tr></thead><tbody>` +
+      j.rows.map(r => `<tr data-k="${r.line[0]}-${r.line[1]}"><td>${r.line[0]}-${r.line[1]}</td><td>${r.islands}</td><td>${r.lost.toFixed(1)}</td><td>${r.overloads}</td><td>${r.max_loading.toFixed(0)}</td><td>${r.min_v.toFixed(3)}</td><td>${r.volt_viol}</td><td>${r.losses.toFixed(1)}</td><td>${r.severity.toFixed(1)}</td></tr>`).join("") + "</tbody></table></div>";
+  } catch (e) { if (my === n1Seq) box.innerHTML = `<p class="small" style="color:${RED}">Error: ${esc(e.message)}</p>`; }
+}
+
+// ---------------------------------------------------------------- scenarios
+function applyScenario(lines, gens, scale) {
+  state.cut = new Set(lines.map(l => l[0] + "-" + l[1]));
+  state.tripped = new Set(gens);
+  state.scale = scale;
+  $("scale").value = scale; $("scaleLbl").textContent = scale;
+  run();
+}
+async function loadDemos() {
+  try {
+    state.demos = await api("GET", "/demo");
+    $("demo").innerHTML = '<option value="-1">Choose a demo scenario…</option>' +
+      state.demos.map((d, i) => `<option value="${i}">${esc(d.name)}</option>`).join("");
+  } catch (e) { $("demo").innerHTML = "<option>Could not load scenarios</option>"; }
+}
+
+// ---------------------------------------------------------------- saved scenarios
+async function loadSaved() {
+  try { state.saved = await api("GET", "/scenarios"); } catch (e) { state.saved = []; }
+  renderSaved();
+}
+function renderSaved() {
+  $("auth").innerHTML = `<h3>Saved scenarios</h3>
+    <p class="small muted">Stored in DynamoDB for this browser.</p>
+    <input id="scname" placeholder="Name for the current setup" maxlength="60">
+    <button data-act="save">Save current scenario</button>
+    <ul>${state.saved.map((s, i) => `<li><b>${esc(s.name)}</b><br><span class="muted">${s.lines.length ? s.lines.map(l => l.join("-")).join(", ") : "no cuts"} · ${s.scale}% demand${s.gens.length ? " · gen " + s.gens.join(",") + " tripped" : ""}</span><br>
+      <button data-act="loadsc" data-i="${i}">Load</button><button class="ghost" data-act="delsc" data-id="${esc(s.id)}">Delete</button></li>`).join("") || '<li class="muted">Nothing saved yet.</li>'}</ul>
+    <p id="authmsg" class="small"></p>`;
+}
+function authMsg(t, err) { const m = $("authmsg"); if (m) { m.textContent = t; m.style.color = err ? RED : ""; } }
+
+document.addEventListener("click", async e => {
+  const t = e.target;
+  const hit = t.closest(".hit");
+  if (hit) { const k = hit.dataset.k; state.cut.has(k) ? state.cut.delete(k) : state.cut.add(k); schedule(); return; }
+  const gen = t.closest("[data-g]");
+  if (gen) { const g = Number(gen.dataset.g); state.tripped.has(g) ? state.tripped.delete(g) : state.tripped.add(g); schedule(); return; }
+  const tab = t.closest(".tab");
+  if (tab) { state.tab = tab.dataset.t; renderTab(); return; }
+  const row = t.closest("tr[data-k]");
+  if (row) { state.cut = new Set([row.dataset.k]); state.tab = "loading"; run(); return; }
+  const a = t.closest("[data-act]"); if (!a) return;
+  try {
+    switch (a.dataset.act) {
+      case "save": {
+        const name = $("scname").value.trim() || "Untitled";
+        await api("POST", "/scenarios", {name, lines:[...state.cut].map(k => k.split("-").map(Number)), gens:[...state.tripped], scale:state.scale});
+        await loadSaved(); authMsg("Saved."); break; }
+      case "loadsc": { const s = state.saved[Number(a.dataset.i)]; applyScenario(s.lines, s.gens, s.scale); break; }
+      case "delsc": await api("DELETE", "/scenarios/" + a.dataset.id); await loadSaved(); break;
+    }
+  } catch (err) { authMsg(err.message, true); }
+});
+
+$("demo").addEventListener("change", e => {
+  const d = state.demos[Number(e.target.value)];
+  if (!d) { $("desc").textContent = ""; return; }
+  $("desc").textContent = d.desc; state.tab = d.tab || "voltage";
+  applyScenario(d.lines, d.gens, d.scale);
+});
+$("scale").addEventListener("input", e => { state.scale = Number(e.target.value); $("scaleLbl").textContent = state.scale; schedule(); });
+$("reset").addEventListener("click", () => { $("demo").value = "-1"; $("desc").textContent = ""; applyScenario([], [], 100); });
+document.querySelectorAll("input[name=mode]").forEach(r => r.addEventListener("change", e => { state.mode = e.target.value; render(); }));
+
+loadSaved(); loadDemos(); run();
+</script>
+</body>
+</html>
